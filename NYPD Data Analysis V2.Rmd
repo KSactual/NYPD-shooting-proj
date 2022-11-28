@@ -1,0 +1,178 @@
+---
+title: "NYPD Shooting Data Analysis"
+author: "Keith S"
+date: "2022-11-06"
+output: html_document
+---
+
+# NYPD Shooting Data Analysis
+
+This report imports and analysis NYPD Shooting Incident Data starting from 2006. This analysis will focus on incidents by time of day / day of week. We will also look at how incidents vary throughout the year. Finally we will look at incidents by location.     
+```{r setup, echo = TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# This code chuck loads required libraries and 
+# imports the require data set
+
+# load required library
+library(plyr)
+library(tidyverse)
+library(lubridate)
+library(ggfortify)
+library(zoo)
+library(forecast)
+
+# load nypd shooting data
+nypd_data <-read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+
+```
+
+
+```{r , echo = TRUE}
+# This code chuck does some initial cleaning
+# and reformatting of our data 
+
+# remove columns we are not going to use 
+# for this analysis
+nypd_data <- select(nypd_data, -c(6,7,8,9,10,11,15,16,17,18,19))
+
+# change date column to date object
+nypd_data <- nypd_data %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE))
+
+# getting total number of incidents
+total_inc <- nrow(nypd_data)
+
+# total incidents by borough , precinct, 
+# age, sex, and race
+by_boro <- as.data.frame(table(nypd_data$BORO))
+by_prec <- as.data.frame(table(nypd_data$PRECINCT))
+by_age <- as.data.frame(table(nypd_data$VIC_AGE_GROUP))
+by_sex <- as.data.frame(table(nypd_data$VIC_SEX))
+by_race <- as.data.frame(table(nypd_data$VIC_RACE))
+
+```
+
+## Incidents by location
+
+### By Borough
+
+First lets break up the data by Borough. The chart below shows a visual representation of the amount of incidents in each borough. 
+
+```{r , echo = TRUE}
+# This code chunk generates a waffle plot 
+# of the number of incidents by borough
+
+# this cleans and organizes the data needed
+# for the waffle plot
+# clean up by_boro data
+colnames(by_boro) <- c("Borough","Incidents")
+bor_table <- table(nypd_data$BORO[1:25595])
+bor_table <- bor_table + 1
+bor_table <- round(bor_table/100, 0)
+nr = 16
+boro_df <- expand.grid(y = 1:nr, x= 1:nr)
+boro_df$Borough <- factor(rep(names(bor_table),bor_table))
+
+
+# waffle plot of incident data by Borough
+ggplot(boro_df, aes(x = x, y = y, fill = Borough)) + geom_tile(color = "black", linewidth = .5) + labs(title = "Incident Distribution by Borough") + theme_void()
+
+```
+
+### By Precinct
+
+Here we break down the location data even further by using incidents by precinct. We have normalized the data to show the deviation of incidents from the mean for each precinct using the calculated Z score. Precincts in green have higher than average incidents and precincts in pink have lower than average number of incidents.
+
+```{r , echo = TRUE}
+# clean up by_prec data
+colnames(by_prec) <- c("Precinct", "Incidents")
+by_prec_norm <- by_prec
+by_prec_norm$z <- round(by_prec_norm$Incidents- mean(by_prec_norm$Incidents))/sd(by_prec_norm$Incidents)
+by_prec_norm$Inc_Type <- ifelse(by_prec_norm$z< 0 , "below", "above")
+by_prec_norm <- by_prec_norm[order(by_prec_norm$z),]
+by_prec_norm$Precinct <- factor(by_prec_norm$Precinct, levels = by_prec_norm$Precinct)
+
+# plot incident data by Precinct
+ggplot(by_prec_norm, aes(x = Precinct , y = z, label = z)) + geom_bar(stat = 'identity', aes(fill = Inc_Type), width = .5) + scale_fill_manual(name = "Incidents", labels = c("Above Avg", "Below Avg"), values = c("above" = "#00ba36", "below" = "#f8768d")) + labs(subtitle = "Normalised Incidents", title = "Precinct Diverging Bar Chart") + coord_flip() + theme(axis.text.y = element_text( vjust = .5, size = 3.5))
+
+```
+
+## Incident change by Date/Time
+
+### Variation of Incidents by season and year.
+
+Now lets look at incident change depending on year, month, day, and time. First lets break the data up to look at seasonal changes and yearly changes. We show this by constructing a seasonality chart with lines for each year. Using historical data by month we will then predict future incidents by month.
+
+```{r , echo = TRUE}
+
+# organizing date data and creating time series of
+# data
+by_date_month <- table(round_date(nypd_data$OCCUR_DATE,unit = "month"))
+inc_date <- ts(by_date_month, frequency = 12)
+year <- c(2006:2022)
+
+# Projected incidents by Month 
+mon <- c('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec')
+by_month <- month(nypd_data$OCCUR_DATE)
+nypd_mod <- as.data.frame(round(table(by_month)/17,0))
+nypd_mod$by_month <- mon
+colnames(nypd_mod) <- c("Month","Projected Incidents")
+nypd_mod$Month <- factor(nypd_mod$Month, levels = nypd_mod$Month)
+
+# plotting data into seasonal chart by year
+ggseasonplot(inc_date) + labs(title = "Incident change by Month") + scale_color_discrete(name = "Year", labels=year)
+
+# plotting expected number of incidents 
+ggplot(nypd_mod, aes(x = Month, y =`Projected Incidents`)) + geom_point() + labs(title = "Predicted number of Incidents by Month") + theme_bw()
+
+
+
+
+```
+
+### Variation of incidents by Time of day and Day of week.
+
+Last lets look at incident variation depending on time of day and day of week. To do this we create a heat map showing change in incidents by day of week and time of day. 
+
+```{r , echo = TRUE}
+
+# organize day and time data
+by_time <- data.frame(matrix(nrow = 25596))
+by_time$wday <- wday(nypd_data$OCCUR_DATE, label= TRUE)
+by_time$hour <- hour(hms(nypd_data$OCCUR_TIME))
+by_time$ymd <- ymd(nypd_data$OCCUR_DATE) + hms(nypd_data$OCCUR_TIME)
+by_time <- by_time[,-1]
+by_time_dh <- ddply(by_time, c("hour","wday"), summarise, N = length(ymd))
+
+# color var used for heat map gradient
+col1 = '#d8e1cf'
+col2 = '#438484'
+
+#plot heat map
+ggplot(by_time_dh, aes(hour,wday)) + geom_tile(aes(fill=N), color = "white", na.rm = TRUE) + scale_fill_gradient(low = col1 , high = col2) + guides(fill = guide_legend(title = "Incidents")) + theme_bw() + labs(title = "Incidents by Day and Time", x = "Incidents by Hour", y = "Incidents by Day")
+
+```
+## Conclusion
+
+### Analysis
+We organized the NYPD shooting incident data by location, date, and time. Using a variety of charts we visually showed the distribution of incidents. Looking at the charts we can see that the bulk of incidents occur in the Bronx and Brooklyn. Breaking it down further the most dangerous precincts are 73 and 75 with incidents over 3 standard deviations away from the mean. The safest precincts include 17 and 22 with incidents almost 1 standard deviation below the mean. 
+
+When looking at time of day we can see that most incidents occur on the weekend between midnight and 6am. By month we can tell that incidents peak in the summer and dip to the lowest levels around February and March. We also predicted future incidents by month of year. 
+
+### Bias
+By looking at only location and date/time data I think I have eliminated most of the bias possible. One thing I did not consider is the population differences between different boroughs and precincts. Coming from a more rural area with a more homogeneous population some of the bias present could be my limited understanding of larger metro areas. This would include diversity of culture and differing neighborhoods.
+
+## Session Info 
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
